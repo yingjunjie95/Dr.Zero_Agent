@@ -26,6 +26,7 @@ from config.agent_profile import AgentProfile
 from tools.registry import ToolRegistry
 from tools.document_processor import DocumentProcessor
 from tools.api_connector import APIConnector, AuthType
+from tools.llm_connector import MiniMaxConnector
 
 
 class DrZeroAgent:
@@ -103,7 +104,7 @@ class DrZeroAgent:
             self.memory_system = MemorySystem(
                 max_sensory_size=100,
                 working_memory_capacity=50,
-                embedding_dim=768  # 与qwen模型匹配
+                embedding_dim=768
             )
 
             # 4. 行动模块
@@ -128,6 +129,15 @@ class DrZeroAgent:
             # 7. 工具模块
             self.document_processor = DocumentProcessor()
             self.api_connector = APIConnector()
+            
+            # 8. LLM连接器（新增）
+            self.llm_connector = MiniMaxConnector(
+                api_key=os.getenv("MINIMAX_API_KEY"),
+                base_url=self.config.API_BASE_URL,
+                model=self.config.MODEL_NAME,
+                timeout=self.config.API_TIMEOUT,
+                max_retries=self.config.API_MAX_RETRIES
+            )
 
             self.logger.info("✅ 所有核心组件初始化成功")
 
@@ -1052,7 +1062,7 @@ class DrZeroAgent:
 
     def _generate_direct_response(self, decision: Dict[str, Any], perception: Dict[str, Any]) -> str:
         """
-        生成直接响应
+        生成直接响应（使用LLM）
         
         Args:
             decision: 决策信息
@@ -1061,14 +1071,104 @@ class DrZeroAgent:
         Returns:
             响应文本
         """
-        # 从决策中提取响应
-        response = decision.get('response', '')
+        user_input = perception.get('user_input', '')
+        context = perception.get('current_context', {})
+        cognitive_state = decision.get('cognitive_state', {})
         
-        # 如果决策中没有响应，使用默认响应
-        if not response:
-            response = self._generate_default_response(perception)
+        try:
+            # 构建消息历史
+            messages = self._build_llm_messages(user_input, context, cognitive_state)
+            
+            # 调用LLM
+            llm_response = self.llm_connector.chat_completion(
+                messages=messages,
+                temperature=self.config.TEMPERATURE,
+                top_p=self.config.TOP_P,
+                max_tokens=self.config.MAX_NEW_TOKENS,
+                use_cache=self.config.CACHE_ENABLED
+            )
+            
+            if llm_response.get('success'):
+                response_text = llm_response.get('response_text', '')
+                self.logger.debug(f"🤖 LLM响应: {response_text[:100]}...")
+                return response_text
+            else:
+                self.logger.warning(f"⚠️ LLM调用失败，使用默认响应")
+                return self._generate_default_response(perception)
+                
+        except Exception as e:
+            self.logger.error(f"❌ LLM调用异常: {str(e)}")
+            return self._generate_default_response(perception)
+
+    def _build_llm_messages(
+        self,
+        user_input: str,
+        context: Dict[str, Any],
+        cognitive_state: Dict[str, Any]
+    ) -> List[Dict[str, str]]:
+        """
+        构建LLM消息列表
         
-        return response
+        Args:
+            user_input: 用户输入
+            context: 上下文信息
+            cognitive_state: 认知状态
+            
+        Returns:
+            消息列表
+        """
+        messages = []
+        
+        # 系统提示词
+        system_prompt = self._build_system_prompt()
+        messages.append({"role": "system", "content": system_prompt})
+        
+        # 添加历史对话（如果有）
+        recent_thoughts = self.thought_process[-3:] if self.thought_process else []
+        for thought in recent_thoughts:
+            if 'perception' in thought and 'response' in thought:
+                messages.append({
+                    "role": "user",
+                    "content": thought['perception'].get('user_input', '')
+                })
+                messages.append({
+                    "role": "assistant",
+                    "content": thought.get('response', '')
+                })
+        
+        # 当前用户输入
+        messages.append({"role": "user", "content": user_input})
+        
+        return messages
+
+    def _build_system_prompt(self) -> str:
+        """构建系统提示词"""
+        return f"""你是Dr.Zero，一个智能助手Agent。
+
+基本信息：
+- 名称：{self.profile.NAME}
+- 版本：{self.profile.VERSION}
+- 语言：{self.profile.LANGUAGE}
+
+性格特征：
+- 性格：{self.profile.PERSONALITY}
+- 沟通风格：{self.profile.COMMUNICATION_STYLE}
+- 共情水平：{self.profile.EMPATHY_LEVEL}
+- 耐心水平：{self.profile.PATIENCE_LEVEL}
+
+能力范围：
+- 允许领域：{', '.join(self.profile.ALLOWED_DOMAINS)}
+- 禁止领域：{', '.join(self.profile.FORBIDDEN_DOMAINS)}
+
+行为准则：
+1. 保持专业且友好的态度
+2. 在不确定时主动澄清
+3. 承认知识局限性
+4. 避免提供医疗、法律、金融等专业建议
+5. 保护用户隐私
+6. 保持透明和可问责
+
+请用中文回复，确保回答准确、有用且安全。"""
 
     def _execute_tools(self, decision: Dict[str, Any], perception: Dict[str, Any], 
                        execution_metrics: Dict[str, Any]) -> str:
@@ -1184,6 +1284,10 @@ class DrZeroAgent:
 
             if hasattr(self, 'session_id'):
                 self.save_state()
+
+            # 关闭LLM连接器
+            if hasattr(self, 'llm_connector'):
+                self.llm_connector.close()
 
             if hasattr(self, 'logger'):
                 self.logger.info("👋 Dr.Zero Agent已安全关闭")

@@ -7,19 +7,28 @@ class SystemConfig:
     MAX_MEMORY_USAGE = 0.85  # 最大内存使用率85%
 
     # ==================== 模型配置 ====================
-    MODEL_NAME = "Qwen/Qwen1.5-4B-Chat"
-    QUANTIZATION = "4bit"  # 4-bit量化
-    MAX_CONTEXT_LENGTH = 2048
+    MODEL_NAME = "MiniMax-M2.7"
+    MODEL_PROVIDER = "minimax"  # 新增：模型提供商
+    MODEL_API_URL = "https://api.minimax.chat/v1/text/chatcompletion_v2"  # 新增：API地址
+    MODEL_API_KEY_ENV = "MINIMAX_API_KEY"  # 新增：API密钥环境变量名
+    QUANTIZATION = None  # Deleted:# 4-bit量化
+    MAX_CONTEXT_LENGTH = 32768  # MiniMax支持更长上下文
     TEMPERATURE = 0.7  # 生成温度，控制随机性
     TOP_P = 0.9  # 核采样参数
-    MAX_NEW_TOKENS = 512  # 最大生成token数
+    MAX_NEW_TOKENS = 2048  # 增加最大生成token数
+
+    # ==================== API配置 ====================
+    API_BASE_URL = "https://api.minimax.chat/v1"
+    API_TIMEOUT = 30
+    API_MAX_RETRIES = 3
+    API_RETRY_DELAY = 1
 
     # ==================== 性能配置 ====================
-    MAX_RESPONSE_TIME = 5.0  # 秒
-    BATCH_SIZE = 2  # CPU优化的batch size
+    MAX_RESPONSE_TIME = 8.0  # 秒，API调用适当放宽
+    BATCH_SIZE = 1  # API调用通常为单条
     THREAD_COUNT = 4  # 匹配CPU核心数
     CACHE_ENABLED = True  # 启用缓存
-    CACHE_MAX_SIZE = 1000  # 缓存最大条目数
+    CACHE_MAX_SIZE = 2000  # 增加缓存大小
 
     # ==================== 安全配置 ====================
     TOOL_EXECUTION_TIMEOUT = 30  # 秒
@@ -67,7 +76,8 @@ class SystemConfig:
         """获取模型配置字典"""
         return {
             "model_name": cls.MODEL_NAME,
-            "quantization": cls.QUANTIZATION,
+            "model_provider": cls.MODEL_PROVIDER,
+            "api_url": cls.MODEL_API_URL,
             "max_context_length": cls.MAX_CONTEXT_LENGTH,
             "temperature": cls.TEMPERATURE,
             "top_p": cls.TOP_P,

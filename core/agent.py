@@ -17,13 +17,15 @@ from .cognition.strategy_selector import StrategySelector
 from .memory.memory_system import MemorySystem
 from .action.tool_engine import ToolEngine
 from .action.decision_maker import DecisionMaker
-from ..learning.continuous_learner import ContinuousLearner
-from ..monitoring.performance_tracker import PerformanceTracker
-from ..config.system_config import SystemConfig
-from ..config.agent_profile import AgentProfile
-from ..tools.registry import ToolRegistry
-from ..tools.document_processor import DocumentProcessor
-from ..tools.api_connector import APIConnector, AuthType
+from learning.continuous_learner import ContinuousLearner
+from learning.experience_replay import ExperienceReplay
+from learning.strategy_optimizer import StrategyOptimizer
+from monitoring.performance_tracker import PerformanceTracker
+from config.system_config import SystemConfig
+from config.agent_profile import AgentProfile
+from tools.registry import ToolRegistry
+from tools.document_processor import DocumentProcessor
+from tools.api_connector import APIConnector, AuthType
 
 
 class DrZeroAgent:
@@ -93,7 +95,7 @@ class DrZeroAgent:
             # 2. 认知模块
             self.metacognitive_engine = MetacognitiveEngine(
                 self_model=SelfModel(agent_profile=self.profile),
-                risk_threshold=self.profile.RISK_THRESHOLD
+                risk_threshold=self.profile.RISK_AVERSION
             )
             self.strategy_selector = StrategySelector()
 
@@ -118,8 +120,12 @@ class DrZeroAgent:
                 learning_rate=self.profile.LEARNING_RATE,
                 exploration_rate=self.profile.EXPLORATION_RATE
             )
+            
+            # 6. 经验回放和策略优化
+            self.experience_replay = ExperienceReplay()
+            self.strategy_optimizer = StrategyOptimizer()
 
-            # 6. 工具模块
+            # 7. 工具模块
             self.document_processor = DocumentProcessor()
             self.api_connector = APIConnector()
 
@@ -157,15 +163,126 @@ class DrZeroAgent:
                 "status": result.status.value
             }
 
+    def _web_search_tool(self, query: str, **kwargs) -> Dict[str, Any]:
+        """
+        网络搜索工具
+        
+        Args:
+            query: 搜索查询
+            num_results: 结果数量
+            structured_output: 是否结构化输出
+            
+        Returns:
+            搜索结果
+        """
+        try:
+            from tools.web_search import WebSearchTool, SearchEngine
+            
+            search_tool = WebSearchTool(
+                default_engine=SearchEngine.DUCKDUCKGO,
+                max_results=kwargs.get('num_results', 5),
+                enable_multi_source=True,
+                enable_reranking=True
+            )
+            
+            results = search_tool.search(
+                query=query,
+                num_results=kwargs.get('num_results', 5),
+                structured_output=kwargs.get('structured_output', True)
+            )
+            
+            return {
+                "success": True,
+                "query": query,
+                "results": results.get('results', []),
+                "count": results.get('result_count', 0),
+                "search_metadata": results.get('search_metadata', {}),
+                "structured_output": results
+            }
+        except Exception as e:
+            self.logger.error(f"网络搜索失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "query": query,
+                "results": []
+            }
+
+    def _document_analysis_tool(self, file_path: str, **kwargs) -> Dict[str, Any]:
+        """
+        文档分析工具
+        
+        Args:
+            file_path: 文件路径
+            
+        Returns:
+            文档分析结果
+        """
+        try:
+            result = self.document_processor.process_document(file_path)
+            
+            return {
+                "success": True,
+                "file_path": file_path,
+                "content": result.get("content", ""),
+                "metadata": result.get("metadata", {})
+            }
+        except Exception as e:
+            self.logger.error(f"文档分析失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "file_path": file_path
+            }
+
+    def _calculator_tool(self, expression: str, **kwargs) -> Dict[str, Any]:
+        """
+        计算器工具
+        
+        Args:
+            expression: 数学表达式
+            
+        Returns:
+            计算结果
+        """
+        try:
+            # 安全的表达式评估
+            allowed_chars = set('0123456789+-*/().^ ')
+            if not all(c in allowed_chars for c in expression):
+                raise ValueError("表达式包含不允许的字符")
+            
+            # 替换 ^ 为 **
+            expression = expression.replace('^', '**')
+            
+            # 安全地计算表达式
+            result = eval(expression, {"__builtins__": {}}, {})
+            
+            return {
+                "success": True,
+                "expression": expression,
+                "result": result
+            }
+        except Exception as e:
+            self.logger.error(f"计算失败: {str(e)}")
+            return {
+                "success": False,
+                "error": str(e),
+                "expression": expression
+            }
+
     def _register_default_tools(self):
         """注册默认工具集"""
+        # 初始化文档处理器
+        self.document_processor = DocumentProcessor()
+        
         # 网络搜索工具
         self.tool_registry.register_tool(
             name="web_search",
             function=self._web_search_tool,
             description="安全的网络搜索工具，用于获取最新信息",
             requires_permission=True,
-            max_calls_per_session=5
+            max_calls_per_session=5,
+            category="search"
         )
 
         # 文档处理工具
@@ -173,7 +290,8 @@ class DrZeroAgent:
             name="document_analysis",
             function=self._document_analysis_tool,
             description="分析和处理文本文档内容",
-            requires_permission=False
+            requires_permission=False,
+            category="document"
         )
 
         # 计算工具
@@ -181,7 +299,8 @@ class DrZeroAgent:
             name="calculator",
             function=self._calculator_tool,
             description="执行数学计算和逻辑运算",
-            requires_permission=False
+            requires_permission=False,
+            category="calculation"
         )
 
         # 代码执行工具（受限）
@@ -190,7 +309,7 @@ class DrZeroAgent:
             function=self._code_executor_tool,
             description="在安全沙箱中执行简单Python代码",
             requires_permission=True,
-            sandbox_enabled=True
+            category="code"
         )
 
         # API调用工具
@@ -199,17 +318,11 @@ class DrZeroAgent:
             function=self._api_call_tool,
             description="调用外部API接口获取数据",
             requires_permission=True,
-            max_calls_per_session=10
+            max_calls_per_session=10,
+            category="api"
         )
 
-        self.document_processor = DocumentProcessor()
-
-        self.tool_registry.register_tool(
-            name="document_analysis",
-            function=lambda file_path, **kwargs: self.document_processor.process_document(file_path),
-            description="分析和处理文本文档内容",
-            requires_permission=False
-        )
+        self.logger.info(f"✅ 已注册 {len(self.tool_registry.tools)} 个工具")
 
     def _api_call_tool(
             self,
@@ -234,7 +347,7 @@ class DrZeroAgent:
             API响应结果
         """
         try:
-            from ..tools.api_connector import HttpMethod
+            from tools.api_connector import HttpMethod
 
             # 转换HTTP方法
             method_map = {
@@ -376,9 +489,208 @@ class DrZeroAgent:
             self.logger.error(f"❌ 处理输入时出错: {str(e)}")
             return self._handle_error(e, user_input)
 
+    def _handle_error(self, error: Exception, user_input: str) -> str:
+        """
+        处理错误并生成友好的错误响应
+        
+        Args:
+            error: 发生的异常
+            user_input: 用户输入
+            
+        Returns:
+            错误响应文本
+        """
+        error_msg = str(error)
+        self.logger.error(f"错误详情: {type(error).__name__}: {error_msg}")
+        
+        # 根据错误类型提供不同的响应
+        if isinstance(error, AttributeError):
+            return f"抱歉，系统内部出现了一些问题（{error_msg}）。我正在记录这个问题以便后续修复。您可以尝试重新描述您的需求。"
+        elif isinstance(error, TimeoutError):
+            return "处理超时了，可能是请求太复杂。请简化您的问题或稍后重试。"
+        elif isinstance(error, MemoryError):
+            return "系统内存不足，我需要清理一些缓存。请稍后再试。"
+        else:
+            return f"处理您的请求时遇到了问题：{error_msg}。我会继续改进我的能力，感谢您的耐心。"
+
+    def _handle_execution_error(self, error: Exception, decision: Dict[str, Any], perception: Dict[str, Any]) -> str:
+        """
+        处理执行阶段的错误
+        
+        Args:
+            error: 执行错误
+            decision: 决策信息
+            perception: 感知信息
+            
+        Returns:
+            错误响应文本
+        """
+        error_msg = str(error)
+        self.logger.error(f"执行错误: {type(error).__name__}: {error_msg}")
+        
+        # 尝试使用备选方案
+        action_plan = decision.get('action_plan', {})
+        fallback_actions = action_plan.get('fallback_actions', [])
+        if fallback_actions:
+            self.logger.info(f"🔄 尝试备选方案: {len(fallback_actions)} 个")
+            return f"主要方案执行失败，正在尝试备选方案... ({error_msg})"
+        
+        # 返回友好错误消息
+        return f"很抱歉，在执行操作时遇到了问题：{error_msg}。我会记录下来并在未来改进。您能否换个方式描述您的需求？"
+
+    def _generate_default_response(self, perception: Dict[str, Any]) -> str:
+        """
+        生成默认响应
+        
+        Args:
+            perception: 感知信息
+            
+        Returns:
+            默认响应文本
+        """
+        user_input = perception.get('user_input', '')
+        user_intent = perception.get('user_intent', {})
+        user_emotion = perception.get('user_emotion', {})
+        
+        # 基于意图类型生成响应
+        intent_type = user_intent.get('intent_type', 'unknown') if isinstance(user_intent, dict) else getattr(user_intent, 'intent_type', None)
+        
+        if intent_type:
+            intent_value = intent_type.value if hasattr(intent_type, 'value') else str(intent_type)
+            
+            # 新增：处理问候和称呼
+            if intent_value in ['greeting', 'name_mention']:
+                # 提取用户提到的名字
+                name = user_input.strip()
+                return f"你好，{name}！很高兴认识你。我是 Dr.Zero Agent，有什么我可以帮助你的吗？"
+            
+            if intent_value in ['conversation', 'greeting']:
+                return "您好！我是 Dr.Zero Agent，很高兴与您交流。请问有什么我可以帮助您的吗？"
+            elif intent_value == 'query':
+                return "我理解您想了解一些信息。能否请您更详细地描述您的问题？这样我可以更好地帮助您。"
+            elif intent_value == 'clarification':
+                return "我需要更多信息来准确回答您的问题。您能提供更多细节吗？"
+        
+        # 检查用户情绪
+        emotion_type = user_emotion.get('primary_emotion', None) if isinstance(user_emotion, dict) else getattr(user_emotion, 'primary_emotion', None)
+        if emotion_type:
+            emotion_value = emotion_type.value if hasattr(emotion_type, 'value') else str(emotion_type)
+            if emotion_value in ['frustration', 'anger']:
+                return "我理解这可能让您感到困扰。我会尽力帮助您解决问题。请告诉我具体需要什么帮助。"
+        
+        # 通用默认响应
+        return f"我收到了您的消息：'{user_input[:50]}...'。我正在分析您的需求，会尽快给您一个合适的回应。如果您有具体问题，请详细说明。"
+
+    def _is_response_adequate(self, response: str, decision: Dict[str, Any]) -> bool:
+        """
+        判断响应是否充分
+        
+        Args:
+            response: Agent生成的响应
+            decision: 决策信息
+            
+        Returns:
+            是否充分
+        """
+        if not response or len(response.strip()) == 0:
+            return False
+        
+        # 检查是否包含错误提示
+        error_indicators = ['错误', 'error', '失败', 'failed', '异常', 'exception']
+        if any(indicator in response.lower() for indicator in error_indicators):
+            return False
+        
+        # 检查响应长度（太短可能不充分）
+        if len(response) < 10:
+            return False
+        
+        # 如果决策要求工具执行但没有工具调用结果，可能不充分
+        action_plan = decision.get('action_plan', {})
+        primary_action = action_plan.get('primary_action', '')
+        
+        if primary_action == 'use_tools':
+            tool_calls = action_plan.get('tool_calls', [])
+            if tool_calls and '工具调用失败' in response:
+                return False
+        
+        return True
+
+    def _calculate_reward(self, execution_metrics: Dict[str, Any], cognitive_state: Dict[str, Any]) -> float:
+        """
+        计算奖励信号（用于强化学习）
+        
+        Args:
+            execution_metrics: 执行指标
+            cognitive_state: 认知状态
+            
+        Returns:
+            奖励值 (-1.0 到 1.0)
+        """
+        reward = 0.0
+        
+        # 1. 基于执行成功与否
+        errors = execution_metrics.get('errors', 0)
+        if errors == 0:
+            reward += 0.5
+        else:
+            reward -= 0.5 * errors
+        
+        # 2. 基于执行时间
+        exec_time = execution_metrics.get('execution_time', 0)
+        if exec_time < 1.0:
+            reward += 0.2
+        elif exec_time > 5.0:
+            reward -= 0.2
+        
+        # 3. 基于置信度
+        confidence = cognitive_state.get('confidence_score', 0.5)
+        reward += (confidence - 0.5) * 0.3
+        
+        # 4. 基于工具使用效率
+        tool_calls = execution_metrics.get('tool_calls', 0)
+        if tool_calls > 0 and tool_calls <= 3:
+            reward += 0.1
+        elif tool_calls > 5:
+            reward -= 0.1
+        
+        # 限制在 [-1.0, 1.0] 范围内
+        return max(-1.0, min(1.0, reward))
+
+    def _evaluate_response(self, response: str) -> float:
+        """
+        评估响应质量
+        
+        Args:
+            response: Agent响应文本
+            
+        Returns:
+            质量评分 (0.0-1.0)
+        """
+        if not response:
+            return 0.0
+        
+        score = 0.5  # 基础分
+        
+        # 1. 长度适中
+        length = len(response)
+        if 50 <= length <= 500:
+            score += 0.2
+        elif length > 1000:
+            score -= 0.1
+        
+        # 2. 不包含错误提示
+        if '错误' not in response and 'error' not in response.lower():
+            score += 0.2
+        
+        # 3. 包含有用信息
+        if any(keyword in response for keyword in ['建议', '分析', '解释', '帮助']):
+            score += 0.1
+        
+        return max(0.0, min(1.0, score))
+
     def _perceive_environment(self, user_input: str) -> Dict[str, Any]:
         """环境感知阶段"""
-        system_resources = self.environment_monitor.get_current_status()
+        system_resources = self.environment_monitor.get_metrics_summary()
         user_intent = self.intent_analyzer.analyze(user_input)
         user_emotion = self.emotion_detector.detect(user_input)
         current_context = self.memory_system.get_current_context()
@@ -449,15 +761,20 @@ class DrZeroAgent:
         execution_metrics = {'tool_calls': 0, 'memory_operations': 0, 'errors': 0}
 
         try:
-            if decision['requires_confirmation']:
+            # 从 action_plan 中获取 requires_confirmation
+            action_plan = decision.get('action_plan', {})
+            requires_confirmation = action_plan.get('requires_confirmation', False)
+            
+            if requires_confirmation:
                 return self._request_confirmation(decision, perception), execution_metrics
 
             # 执行主要行动
-            if decision['primary_action'] == 'direct_response':
+            primary_action = action_plan.get('primary_action', 'direct_response')
+            if primary_action == 'direct_response':
                 response = self._generate_direct_response(decision, perception)
-            elif decision['primary_action'] == 'use_tools':
+            elif primary_action == 'use_tools':
                 response = self._execute_tools(decision, perception, execution_metrics)
-            elif decision['primary_action'] == 'escalate':
+            elif primary_action == 'escalate':
                 response = self._handle_escalation(decision, perception)
             else:
                 response = self._generate_default_response(perception)
@@ -580,7 +897,7 @@ class DrZeroAgent:
             'thoughts': self.thought_process[-1] if self.thought_process else None,
             'memory_stats': self.memory_system.get_statistics(),
             'performance_metrics': self.performance_tracker.get_summary(),
-            'resource_usage': self.environment_monitor.get_current_status(),
+            'resource_usage': self.environment_monitor.get_metrics_summary(),
             'session_id': self.session_id
         }
 
@@ -588,7 +905,7 @@ class DrZeroAgent:
         """获取Agent当前能力列表"""
         capabilities = [
             f"🧠 记忆能力: {self.memory_system.get_capacity_description()}",
-            f"🔍 分析能力: {self.intent_analyzer.get_capability_description()}",
+            f"🔍 分析能力: 意图识别、情绪检测、环境监控",
             f"🛠️ 工具能力: {', '.join(self.tool_registry.get_tool_names())}",
             f"⚡ 性能: CPU优化，{self.config.CPU_CORES}核心，{self.config.MEMORY_GB}GB内存"
         ]
@@ -622,15 +939,15 @@ class DrZeroAgent:
         """后台资源监控循环"""
         while self.is_active:
             try:
-                current_status = self.environment_monitor.get_current_status()
+                current_status = self.environment_monitor.get_metrics_summary()
 
                 # 检查资源警报
-                if current_status['memory_usage'] > self.config.MAX_MEMORY_USAGE:
-                    self.logger.warning(f"⚠️ 内存使用率过高: {current_status['memory_usage']:.1%}")
+                if current_status.get('current', {}).get('memory_percent', 0) > self.config.MAX_MEMORY_USAGE * 100:
+                    self.logger.warning(f"⚠️ 内存使用率过高: {current_status['current']['memory_percent']:.1f}%")
                     self._optimize_memory_usage()
 
-                if current_status['cpu_load'] > 0.9:
-                    self.logger.warning(f"⚠️ CPU负载过高: {current_status['cpu_load']:.1%}")
+                if current_status.get('current', {}).get('cpu_percent', 0) > 90:
+                    self.logger.warning(f"⚠️ CPU负载过高: {current_status['current']['cpu_percent']:.1f}%")
                     self._optimize_cpu_usage()
 
                 time.sleep(5)  # 每5秒检查一次
@@ -694,8 +1011,13 @@ class DrZeroAgent:
 
     def _assess_resource_constraints(self, system_resources: Dict[str, Any]) -> Dict[str, Any]:
         """评估当前资源约束"""
-        memory_constraint = system_resources['memory_usage'] > self.config.MAX_MEMORY_USAGE
-        cpu_constraint = system_resources['cpu_load'] > 0.85
+        # 从嵌套结构中获取资源使用情况
+        current = system_resources.get('current', {})
+        memory_percent = current.get('memory_percent', 0) / 100.0  # 转换为小数 (0-1)
+        cpu_percent = current.get('cpu_percent', 0) / 100.0  # 转换为小数 (0-1)
+        
+        memory_constraint = memory_percent > self.config.MAX_MEMORY_USAGE
+        cpu_constraint = cpu_percent > 0.85
 
         return {
             'memory_constrained': memory_constraint,
@@ -728,8 +1050,142 @@ class DrZeroAgent:
         # 减少并行操作
         self.config.THREAD_COUNT = max(1, self.config.THREAD_COUNT // 2)
 
+    def _generate_direct_response(self, decision: Dict[str, Any], perception: Dict[str, Any]) -> str:
+        """
+        生成直接响应
+        
+        Args:
+            decision: 决策信息
+            perception: 感知信息
+            
+        Returns:
+            响应文本
+        """
+        # 从决策中提取响应
+        response = decision.get('response', '')
+        
+        # 如果决策中没有响应，使用默认响应
+        if not response:
+            response = self._generate_default_response(perception)
+        
+        return response
+
+    def _execute_tools(self, decision: Dict[str, Any], perception: Dict[str, Any], 
+                       execution_metrics: Dict[str, Any]) -> str:
+        """
+        执行工具调用
+        
+        Args:
+            decision: 决策信息
+            perception: 感知信息
+            execution_metrics: 执行指标
+            
+        Returns:
+            工具执行结果
+        """
+        action_plan = decision.get('action_plan', {})
+        tool_calls = action_plan.get('tool_calls', [])
+        
+        if not tool_calls:
+            return self._generate_default_response(perception)
+        
+        results = []
+        for tool_call in tool_calls:
+            try:
+                tool_name = tool_call.get('tool_name', '')
+                tool_params = tool_call.get('params', {})
+                
+                result = self.tool_engine.execute_tool(tool_name, **tool_params)
+                results.append(result)
+                execution_metrics['tool_calls'] += 1
+            except Exception as e:
+                self.logger.error(f"工具调用失败 {tool_name}: {str(e)}")
+                execution_metrics['errors'] += 1
+        
+        # 整合工具结果生成响应
+        if results:
+            return f"已完成相关操作。结果：{str(results[:3])}"
+        return "工具执行完成。"
+
+    def _execute_fallback(self, decision: Dict[str, Any], perception: Dict[str, Any],
+                          execution_metrics: Dict[str, Any]) -> str:
+        """
+        执行备选方案
+        
+        Args:
+            decision: 决策信息
+            perception: 感知信息
+            execution_metrics: 执行指标
+            
+        Returns:
+            备选方案响应
+        """
+        action_plan = decision.get('action_plan', {})
+        fallback_actions = action_plan.get('fallback_actions', [])
+        
+        self.logger.info(f"🔄 尝试备选方案: {len(fallback_actions)} 个")
+        
+        for fallback in fallback_actions:
+            if fallback == 'escalate':
+                return self._handle_escalation(decision, perception)
+            elif fallback == 'clarify':
+                return "我需要更多信息来准确回答您的问题。能否请您详细说明一下？"
+            elif fallback == 'direct_response':
+                return self._generate_default_response(perception)
+        
+        return "抱歉，当前无法处理您的需求。请稍后再试或换个方式描述。"
+
+    def _request_confirmation(self, decision: Dict[str, Any], perception: Dict[str, Any]) -> str:
+        """
+        请求用户确认
+        
+        Args:
+            decision: 决策信息
+            perception: 感知信息
+            
+        Returns:
+            确认请求文本
+        """
+        action_plan = decision.get('action_plan', {})
+        tool_calls = action_plan.get('tool_calls', [])
+        
+        if tool_calls:
+            tool_names = [t.get('tool_name', '未知工具') for t in tool_calls]
+            return f"我需要执行以下操作：{', '.join(tool_names)}。您确认要继续吗？"
+        
+        return "为了确保准确性，我需要您确认一些信息。请提供更多细节。"
+
+    def _handle_escalation(self, decision: Dict[str, Any], perception: Dict[str, Any]) -> str:
+        """
+        处理升级（无法处理时的兜底响应）
+        
+        Args:
+            decision: 决策信息
+            perception: 感知信息
+            
+        Returns:
+            升级响应文本
+        """
+        user_input = perception.get('user_input', '')
+        return (
+            f"抱歉，我目前无法完全处理您的需求：'{user_input[:50]}...'。\n"
+            "这可能是由于问题复杂度超出我的能力范围，或者需要更多上下文信息。\n"
+            "建议您：\n"
+            "1. 简化问题或分步骤描述\n"
+            "2. 提供更多背景信息\n"
+            "3. 尝试换一种方式表达"
+        )
+
     def __del__(self):
         """析构函数，确保资源清理"""
-        self.is_active = False
-        self.save_state()
-        self.logger.info("👋 Dr.Zero Agent已安全关闭")
+        try:
+            if hasattr(self, 'is_active'):
+                self.is_active = False
+
+            if hasattr(self, 'session_id'):
+                self.save_state()
+
+            if hasattr(self, 'logger'):
+                self.logger.info("👋 Dr.Zero Agent已安全关闭")
+        except Exception:
+            pass

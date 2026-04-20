@@ -201,63 +201,85 @@ class MemorySystem:
 
         return longterm_id
 
-    def retrieve_relevant_knowledge(self,
-                                   query: str,
-                                   context: Optional[Dict[str, Any]] = None,
-                                   top_k: int = 10) -> List[Dict[str, Any]]:
+    def retrieve_relevant_knowledge(
+        self,
+        query: str,
+        context: Dict[str, Any] = None,
+        top_k: int = 5
+    ) -> List[Dict[str, Any]]:
         """
-        检索相关知识（跨层级检索）
-
+        检索相关知识
+        
         Args:
             query: 查询文本
             context: 上下文信息
-            top_k: 返回数量
-
+            top_k: 返回结果数量
+            
         Returns:
-            相关记忆列表
+            相关知识列表
         """
-        results = []
+        relevant_items = []
 
-        # 1. 从工作记忆检索（高优先级）
-        working_items = self.working_memory.retrieve_by_relevance(
-            query=query,
-            top_k=top_k // 2
-        )
-
-        for item in working_items:
-            results.append({
-                "source": "working_memory",
-                "item_id": item.item_id,
-                "content": item.content,
-                "relevance": item.relevance_score,
-                "attention": item.attention.value,
-                "type": item.memory_type.value
-            })
-
-        # 2. 从长期记忆检索
-        remaining_k = top_k - len(results)
-        if remaining_k > 0:
-            longterm_items = self.long_term_memory.retrieve_by_query(
+        # 1. 从工作记忆中检索
+        try:
+            working_memories = self.working_memory.retrieve_by_relevance(
                 query=query,
-                top_k=remaining_k
+                top_k=top_k,
+                min_relevance=0.3
             )
+            relevant_items.extend([
+                {
+                    "source": "working_memory",
+                    "item_id": m.item_id,
+                    "content": str(m.content)[:200] if m.content else "",
+                    "relevance": m.relevance_score,
+                    "category": m.memory_type.value
+                }
+                for m in working_memories
+            ])
+        except Exception as e:
+            self.logger.warning(f"工作记忆检索失败: {str(e)}")
 
-            for item in longterm_items:
-                results.append({
-                    "source": "long_term_memory",
+        # 2. 从长期记忆中检索
+        try:
+            long_term_items = self.long_term_memory.retrieve_by_query(
+                query=query,
+                top_k=top_k * 2,
+                min_importance=0.3
+            )
+            
+            # 转换为字典格式
+            long_term_memories = [
+                {
                     "item_id": item.item_id,
-                    "content": item.content,
-                    "relevance": item.importance,
+                    "content": item.content[:200] if item.content else "",
+                    "relevance": item.calculate_strength(),
                     "category": item.category.value,
-                    "strength": item.calculate_strength()
-                })
+                    "tags": item.tags
+                }
+                for item in long_term_items
+            ]
+            
+            relevant_items.extend([
+                {"source": "long_term_memory", **m}
+                for m in long_term_memories
+            ])
+        except Exception as e:
+            self.logger.warning(f"长期记忆检索失败: {str(e)}")
 
-        # 按相关性排序
-        results.sort(key=lambda x: x.get("relevance", 0), reverse=True)
+        # 3. 合并并按相关性排序
+        relevant_items.sort(key=lambda x: x.get('relevance', 0), reverse=True)
+        
+        # 去重（避免相似内容重复）
+        seen_contents = set()
+        unique_items = []
+        for item in relevant_items:
+            content_key = item.get('content', '').strip().lower()
+            if content_key and content_key not in seen_contents:
+                seen_contents.add(content_key)
+                unique_items.append(item)
 
-        self.logger.debug(f"🔍 检索相关知识: {len(results)} 条结果")
-
-        return results
+        return unique_items[:top_k]
 
     def store_interaction(self,
                          user_input: str,
@@ -472,6 +494,15 @@ class MemorySystem:
 
         except Exception as e:
             self.logger.error(f"❌ 保存记忆系统失败: {str(e)}")
+
+    def load_from_persistence(self):
+        """从持久化存储加载记忆"""
+        try:
+            # 长期记忆在初始化时已自动加载，无需再次加载
+            self.logger.info("📂 记忆系统已从持久化存储加载")
+
+        except Exception as e:
+            self.logger.error(f"❌ 加载记忆系统失败: {str(e)}")
 
     def clear_caches(self):
         """清理缓存"""

@@ -242,9 +242,17 @@ class ExperienceReplay:
         self.buffer.append(experience)
         self.experience_index[experience_id] = buffer_index
 
-        # 更新优先级树
+        # 更新优先级树 - 将 PriorityLevel 枚举转换为数值
         if self.config.prioritized_replay:
-            self._update_priority_tree(buffer_index, priority ** self.config.priority_alpha)
+            # 将枚举转换为数值：LOW=0.2, MEDIUM=0.5, HIGH=0.8, CRITICAL=1.0
+            priority_value_map = {
+                PriorityLevel.LOW: 0.2,
+                PriorityLevel.MEDIUM: 0.5,
+                PriorityLevel.HIGH: 0.8,
+                PriorityLevel.CRITICAL: 1.0
+            }
+            priority_numeric = priority_value_map.get(priority, 0.5)
+            self._update_priority_tree(buffer_index, priority_numeric ** self.config.priority_alpha)
 
         # 更新统计
         self.stats["total_experiences_added"] += 1

@@ -11,6 +11,7 @@ class AgentProfile:
 
     # ==================== 能力边界 ====================
     ALLOWED_DOMAINS = [
+        "general",
         "general_knowledge",
         "technical_analysis",
         "document_processing",

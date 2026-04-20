@@ -22,6 +22,8 @@ class IntentType(Enum):
     DATA_ANALYSIS = "data_analysis"  # 数据分析
     CLARIFICATION = "clarification"  # 澄清请求
     CONVERSATION = "conversation"  # 闲聊对话
+    GREETING = "greeting"  # 问候/称呼
+    NAME_MENTION = "name_mention"  # 姓名提及
     TASK_EXECUTION = "task_execution"  # 任务执行
     LEARNING = "learning"  # 学习请求
     UNKNOWN = "unknown"  # 未知意图
@@ -212,6 +214,26 @@ class IntentAnalyzer:
             score = self._calculate_pattern_match(text, patterns)
             scores[intent_type] = score
 
+        # 特殊处理：短文本检测（如单个名字、单词）
+        if len(text.split()) <= 2 and len(text) < 20:
+            # 检查是否是人名或称呼
+            if text[0].isupper() and text.isalpha():
+                # 大写字母开头的纯字母单词，很可能是人名
+                greeting_score = scores.get('greeting', 0)
+                conversation_score = scores.get('conversation', 0)
+                
+                # 提升问候和对话类型的分数
+                if greeting_score < 0.3:
+                    scores['greeting'] = max(scores.get('greeting', 0), 0.6)
+                if conversation_score < 0.3:
+                    scores['conversation'] = max(scores.get('conversation', 0), 0.5)
+            
+            # 检查是否包含常见称呼词
+            common_names = ['michael', 'mike', 'john', 'mary', 'david', 'sarah']
+            if text.lower() in common_names:
+                scores['greeting'] = max(scores.get('greeting', 0), 0.7)
+                scores['conversation'] = max(scores.get('conversation', 0), 0.6)
+
         # 找到最高分
         best_intent = max(scores, key=scores.get)
         best_score = scores[best_intent]
@@ -346,6 +368,7 @@ class IntentAnalyzer:
             entities['urls'] = urls
 
         # 提取代码片段标记
+        code_languages = []
         if '代码' in text:
             code_languages = re.findall(
                 r'(\w+)',
@@ -364,6 +387,11 @@ class IntentAnalyzer:
     ) -> Tuple[bool, List[str]]:
         """判断是否需要澄清"""
         questions = []
+
+        # 新增：对于简短的称呼/问候，不需要澄清
+        if intent_type in [IntentType.GREETING, IntentType.CONVERSATION]:
+            if len(text.split()) <= 3:
+                return False, []
 
         # 检查模糊词汇
         vague_words = ['某个', '一些', '大概', '可能', '也许', '随便', '都行']
@@ -497,6 +525,15 @@ class IntentAnalyzer:
             "conversation": [
                 "你好", "谢谢", "再见", "聊天", "最近",
                 "hello", "hi", "thanks", "bye", "chat"
+            ],
+            "greeting": [
+                "您好", "早上好", "下午好", "晚上好",
+                "good morning", "good afternoon", "good evening",
+                "hey", "greetings"
+            ],
+            "name_mention": [
+                "我叫", "名字是", "这是", "认识一下",
+                "my name is", "i am", "this is", "meet"
             ],
             "task_execution": [
                 "执行", "运行", "操作", "完成", "帮我",

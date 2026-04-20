@@ -54,6 +54,36 @@ class SearchResponse:
     engine_used: str = ""
     error_message: Optional[str] = None
 
+    def to_structured_output(self) -> Dict[str, Any]:
+        """生成结构化输出（针对比赛优化）"""
+        structured = {
+            "query": self.query,
+            "success": self.success,
+            "result_count": len(self.results),
+            "results": [
+                {
+                    "rank": idx + 1,
+                    "title": r.title,
+                    "url": r.url,
+                    "snippet": r.snippet[:200],
+                    "source": r.source,
+                    "relevance_score": round(r.relevance_score, 3),
+                    "published_date": r.published_date
+                }
+                for idx, r in enumerate(self.results)
+            ],
+            "search_metadata": {
+                "engine": self.engine_used,
+                "search_time_ms": round(self.search_time_ms, 2),
+                "total_available": self.total_results
+            }
+        }
+        
+        if not self.success and self.error_message:
+            structured["error"] = self.error_message
+        
+        return structured
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -79,6 +109,8 @@ class WebSearchTool:
     - 速率限制：控制搜索频率避免被封
     - 缓存机制：缓存常见搜索结果
     - 安全保护：防止恶意查询和注入
+    - 多源聚合：合并多个引擎的结果
+    - 结果重排：基于相关度重新排序
     """
 
     def __init__(
@@ -88,7 +120,9 @@ class WebSearchTool:
         timeout_seconds: float = 10.0,
         rate_limit_seconds: float = 2.0,
         enable_cache: bool = True,
-        cache_ttl_seconds: int = 3600
+        cache_ttl_seconds: int = 3600,
+        enable_multi_source: bool = True,
+        enable_reranking: bool = True
     ):
         """
         初始化网络搜索工具
@@ -100,6 +134,8 @@ class WebSearchTool:
             rate_limit_seconds: 搜索间隔限制（秒）
             enable_cache: 是否启用缓存
             cache_ttl_seconds: 缓存有效期（秒）
+            enable_multi_source: 是否启用多源搜索
+            enable_reranking: 是否启用结果重排
         """
         self.default_engine = default_engine
         self.max_results = max_results
@@ -107,6 +143,8 @@ class WebSearchTool:
         self.rate_limit_seconds = rate_limit_seconds
         self.enable_cache = enable_cache
         self.cache_ttl_seconds = cache_ttl_seconds
+        self.enable_multi_source = enable_multi_source
+        self.enable_reranking = enable_reranking
 
         self.logger = logging.getLogger("WebSearchTool")
 
@@ -130,7 +168,7 @@ class WebSearchTool:
 
         self.logger.info(
             f"✅ 网络搜索工具初始化完成 - 引擎: {default_engine.value}, "
-            f"最大结果: {max_results}"
+            f"最大结果: {max_results}, 多源: {enable_multi_source}"
         )
 
     def search(
@@ -139,7 +177,8 @@ class WebSearchTool:
         num_results: Optional[int] = None,
         engine: Optional[SearchEngine] = None,
         language: str = "zh-CN",
-        safe_search: bool = True
+        safe_search: bool = True,
+        structured_output: bool = True
     ) -> Dict[str, Any]:
         """
         执行网络搜索
@@ -150,6 +189,7 @@ class WebSearchTool:
             engine: 搜索引擎
             language: 语言设置
             safe_search: 是否启用安全搜索
+            structured_output: 是否返回结构化输出
 
         Returns:
             搜索结果字典
@@ -185,17 +225,17 @@ class WebSearchTool:
 
             self.logger.info(f"🔍 执行搜索: {query[:50]}... (引擎: {search_engine.value})")
 
-            # 根据搜索引擎选择实现
-            if search_engine == SearchEngine.DUCKDUCKGO:
-                response = self._search_duckduckgo(query, result_count, language, safe_search)
-            elif search_engine == SearchEngine.BING:
-                response = self._search_bing(query, result_count, language, safe_search)
-            elif search_engine == SearchEngine.GOOGLE:
-                response = self._search_google(query, result_count, language, safe_search)
-            elif search_engine == SearchEngine.BAIDU:
-                response = self._search_baidu(query, result_count, language, safe_search)
+            # 多源搜索聚合
+            if self.enable_multi_source and engine is None:
+                response = self._search_multi_source(query, result_count, language, safe_search)
             else:
-                raise ValueError(f"不支持的搜索引擎: {search_engine.value}")
+                response = self._search_single_engine(
+                    query, result_count, language, safe_search, search_engine
+                )
+
+            # 结果重排
+            if self.enable_reranking and response.success:
+                response.results = self._rerank_results(response.results, query)
 
             # 计算搜索时间
             search_time_ms = (time.time() - start_time) * 1000
@@ -225,6 +265,8 @@ class WebSearchTool:
                 f"耗时: {search_time_ms:.0f}ms"
             )
 
+            if structured_output:
+                return response.to_structured_output()
             return response.to_dict()
 
         except Exception as e:
@@ -495,6 +537,150 @@ class WebSearchTool:
         """获取Google Custom Search ID"""
         import os
         return os.getenv('GOOGLE_CX')
+
+    def _search_multi_source(
+        self,
+        query: str,
+        num_results: int,
+        language: str,
+        safe_search: bool
+    ) -> SearchResponse:
+        """多源搜索聚合"""
+        self.logger.info(f"🌐 多源搜索: {query[:50]}")
+        
+        all_results: List[SearchResult] = []
+        engines_used = []
+        total_time = 0.0
+        
+        engines_to_try = [
+            SearchEngine.DUCKDUCKGO,
+            SearchEngine.BING,
+            SearchEngine.BAIDU
+        ]
+        
+        for engine in engines_to_try:
+            try:
+                self.logger.debug(f"尝试引擎: {engine.value}")
+                engine_start = time.time()
+                
+                if engine == SearchEngine.DUCKDUCKGO:
+                    response = self._search_duckduckgo(
+                        query, num_results, language, safe_search
+                    )
+                elif engine == SearchEngine.BING:
+                    response = self._search_bing(
+                        query, num_results, language, safe_search
+                    )
+                elif engine == SearchEngine.BAIDU:
+                    response = self._search_baidu(
+                        query, num_results, language, safe_search
+                    )
+                
+                engine_time = (time.time() - engine_start) * 1000
+                total_time += engine_time
+                
+                if response.success and response.results:
+                    engines_used.append(engine.value)
+                    all_results.extend(response.results)
+                    self.logger.info(
+                        f"✅ {engine.value} 返回 {len(response.results)} 条结果"
+                    )
+                
+            except Exception as e:
+                self.logger.warning(f"⚠️ {engine.value} 搜索失败: {str(e)}")
+                continue
+        
+        if not all_results:
+            return SearchResponse(
+                success=False,
+                query=query,
+                results=[],
+                search_time_ms=total_time,
+                engine_used="multi_source",
+                error_message="所有搜索引擎均失败"
+            )
+        
+        all_results = self._deduplicate_results(all_results)
+        all_results = all_results[:num_results * 2]
+        
+        return SearchResponse(
+            success=True,
+            query=query,
+            results=all_results,
+            total_results=len(all_results),
+            search_time_ms=0.0,
+            engine_used="multi_source"
+        )
+
+    def _search_single_engine(
+        self,
+        query: str,
+        num_results: int,
+        language: str,
+        safe_search: bool,
+        engine: SearchEngine
+    ) -> SearchResponse:
+        """单引擎搜索"""
+        if engine == SearchEngine.DUCKDUCKGO:
+            return self._search_duckduckgo(query, num_results, language, safe_search)
+        elif engine == SearchEngine.BING:
+            return self._search_bing(query, num_results, language, safe_search)
+        elif engine == SearchEngine.GOOGLE:
+            return self._search_google(query, num_results, language, safe_search)
+        elif engine == SearchEngine.BAIDU:
+            return self._search_baidu(query, num_results, language, safe_search)
+        else:
+            raise ValueError(f"不支持的搜索引擎: {engine.value}")
+
+    def _deduplicate_results(self, results: List[SearchResult]) -> List[SearchResult]:
+        """去重搜索结果（基于URL）"""
+        seen_urls = set()
+        unique_results = []
+        
+        for result in results:
+            if result.url not in seen_urls:
+                seen_urls.add(result.url)
+                unique_results.append(result)
+        
+        return unique_results
+
+    def _rerank_results(
+        self, 
+        results: List[SearchResult], 
+        query: str
+    ) -> List[SearchResult]:
+        """
+        基于查询关键词重排结果
+        提升包含更多查询关键词的结果排名
+        """
+        query_keywords = query.lower().split()
+        
+        def calculate_rerank_score(result: SearchResult) -> float:
+            score = result.relevance_score
+            
+            title_text = result.title.lower()
+            snippet_text = result.snippet.lower()
+            
+            keyword_matches = 0
+            for keyword in query_keywords:
+                if len(keyword) > 1:
+                    if keyword in title_text:
+                        keyword_matches += 2
+                    if keyword in snippet_text:
+                        keyword_matches += 1
+            
+            title_bonus = 0.15 if any(kw in title_text for kw in query_keywords[:3]) else 0
+            
+            return score + (keyword_matches * 0.05) + title_bonus
+        
+        reranked = sorted(results, key=calculate_rerank_score, reverse=True)
+        
+        for i, result in enumerate(reranked):
+            result.relevance_score = min(1.0, 
+                calculate_rerank_score(result) + (len(reranked) - i) * 0.01
+            )
+        
+        return reranked
 
     def get_statistics(self) -> Dict[str, Any]:
         """获取搜索统计信息"""

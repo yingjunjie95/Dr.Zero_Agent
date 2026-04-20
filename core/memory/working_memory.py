@@ -200,7 +200,8 @@ class WorkingMemory:
             "current_focus": [],
             "recent_topics": deque(maxlen=10),
             "user_intent": None,
-            "conversation_stage": "initial"
+            "conversation_stage": "initial",
+            "active_goals": []
         }
 
         # 统计信息

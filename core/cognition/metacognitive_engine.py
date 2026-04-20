@@ -75,10 +75,22 @@ class MetacognitiveAssessment:
 
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
+        # 处理 confidence_level 可能是字符串或枚举的情况
+        if hasattr(self.confidence_level, 'value'):
+            confidence_level_value = self.confidence_level.value
+        else:
+            confidence_level_value = self.confidence_level
+            
+        # 处理 risk_level 可能是 RiskLevel 枚举或字符串的情况
+        if hasattr(self.risk_level, 'value'):
+            risk_level_value = self.risk_level.value
+        else:
+            risk_level_value = str(self.risk_level)
+            
         return {
             "overall_confidence": round(self.overall_confidence, 3),
-            "confidence_level": self.confidence_level.value,
-            "risk_level": self.risk_level.value,
+            "confidence_level": confidence_level_value,
+            "risk_level": risk_level_value,
             "cognitive_state": self.cognitive_state.value,
             "self_awareness_score": round(self.self_awareness_score, 3),
             "knowledge_gaps": self.knowledge_gaps,
@@ -436,6 +448,25 @@ class MetacognitiveEngine:
             self.logger.error(f"❌ 元认知评估失败: {str(e)}", exc_info=True)
             return self._create_fallback_assessment()
 
+    def _map_confidence_level(self, confidence: float) -> str:
+        """
+        将置信度数值映射为等级
+        
+        Args:
+            confidence: 置信度 (0.0-1.0)
+            
+        Returns:
+            置信度等级字符串
+        """
+        if confidence >= 0.8:
+            return "high"
+        elif confidence >= 0.5:
+            return "medium"
+        elif confidence >= 0.3:
+            return "low"
+        else:
+            return "very_low"
+
     def _assess_task_complexity(
         self,
         user_input: str,
@@ -445,8 +476,12 @@ class MetacognitiveEngine:
         """评估任务复杂度"""
         complexity = 0.0
 
-        # 基于输入长度
+        # 新增：超短文本通常是简单任务
         word_count = len(user_input.split())
+        if word_count <= 2:
+            return 0.1  # 非常低的复杂度
+        
+        # 基于输入长度
         if word_count > 100:
             complexity += 0.3
         elif word_count > 50:
@@ -458,6 +493,8 @@ class MetacognitiveEngine:
         if user_intent:
             intent_complexity_map = {
                 "conversation": 0.1,
+                "greeting": 0.05,  # 新增：问候非常简单
+                "name_mention": 0.1,  # 新增：姓名提及也很简单
                 "query": 0.3,
                 "clarification": 0.2,
                 "code_assistance": 0.6,
@@ -595,6 +632,10 @@ class MetacognitiveEngine:
         # 应用校准因子
         confidence *= self.confidence_calibration_factor
 
+        # 新增：对于简单任务，提高最低置信度
+        if task_complexity < 0.3:
+            confidence = max(confidence, 0.5)
+
         return min(max(confidence, 0.0), 1.0)
 
     def _assess_risks(
@@ -630,7 +671,9 @@ class MetacognitiveEngine:
         # 3. 领域风险
         if user_intent:
             domain = getattr(user_intent, 'domain', 'general')
-            if domain in self.self_model.forbidden_domains:
+            # 检查是否在禁止领域中
+            forbidden_domains = self.self_model.profile.FORBIDDEN_DOMAINS
+            if domain in forbidden_domains:
                 risks.append({
                     "type": "forbidden_domain",
                     "severity": "critical",

@@ -160,7 +160,15 @@ class DecisionMaker:
 
             reasoning_trace.append(f"策略类型: {strategy.get('type', 'unknown')}")
             reasoning_trace.append(f"置信度: {confidence:.2f}")
-            reasoning_trace.append(f"风险等级: {risk_level:.2f}")
+            
+            # risk_level 可能是 RiskLevel 枚举或字符串，需要安全处理
+            if hasattr(risk_level, 'value'):
+                risk_display = risk_level.value
+            elif isinstance(risk_level, (int, float)):
+                risk_display = f"{risk_level:.2f}"
+            else:
+                risk_display = str(risk_level)
+            reasoning_trace.append(f"风险等级: {risk_display}")
 
             # 2. 创建行动计划
             action_plan = self._create_action_plan(
